@@ -2,13 +2,14 @@ import React from 'react';
 import { X, Printer, Download, Building2 } from 'lucide-react';
 import { INDICATORS, MONTH_NAMES, UNITS } from '../data/inmConfig';
 import { HospitalConfig, MonthlyRecord } from '../types/inm';
-import { computeMonthlySummaries, formatNumber } from '../utils/calculations';
+import { computeAnnualSummaries, computeMonthlySummaries, formatNumber } from '../utils/calculations';
 
 interface PrintReportModalProps {
   isOpen: boolean;
   onClose: () => void;
   record: MonthlyRecord;
   hospital: HospitalConfig;
+  yearRecords?: Record<number, MonthlyRecord>;
 }
 
 export const PrintReportModal: React.FC<PrintReportModalProps> = ({
@@ -16,10 +17,15 @@ export const PrintReportModal: React.FC<PrintReportModalProps> = ({
   onClose,
   record,
   hospital,
+  yearRecords,
 }) => {
   if (!isOpen) return null;
 
   const summaries = computeMonthlySummaries(record);
+  const annualSummary = computeAnnualSummaries(
+    record.year,
+    yearRecords || { [record.month]: record }
+  );
   const monthName = MONTH_NAMES[record.month - 1];
 
   const handlePrint = () => {
@@ -92,13 +98,16 @@ export const PrintReportModal: React.FC<PrintReportModalProps> = ({
                 <tr className="bg-slate-100 text-slate-900 font-bold font-sans">
                   <th className="border border-slate-400 py-2.5 px-2 text-center w-10">NO.</th>
                   <th className="border border-slate-400 py-2.5 px-3 text-left">INDIKATOR NASIONAL MUTU</th>
-                  <th className="border border-slate-400 py-2.5 px-2 text-center w-28">STANDAR</th>
-                  <th className="border border-slate-400 py-2.5 px-2 text-right w-28">RATA-RATA (N)</th>
-                  <th className="border border-slate-400 py-2.5 px-2 text-right w-28">RATA-RATA (D)</th>
-                  <th className="border border-slate-400 py-2.5 px-3 text-center w-36 bg-slate-200">
-                    NILAI RATA-RATA (%)
+                  <th className="border border-slate-400 py-2.5 px-2 text-center w-24">STANDAR</th>
+                  <th className="border border-slate-400 py-2.5 px-2 text-right w-24">RATA (N)</th>
+                  <th className="border border-slate-400 py-2.5 px-2 text-right w-24">RATA (D)</th>
+                  <th className="border border-slate-400 py-2.5 px-2 text-center w-28 bg-slate-200">
+                    RATA BULAN ({monthName.substring(0, 3).toUpperCase()})
                   </th>
-                  <th className="border border-slate-400 py-2.5 px-2 text-center w-32">STATUS</th>
+                  <th className="border border-slate-400 py-2.5 px-2 text-center w-32 bg-emerald-100 text-emerald-950">
+                    RATA TAHUN ({record.year})
+                  </th>
+                  <th className="border border-slate-400 py-2.5 px-2 text-center w-28">STATUS</th>
                 </tr>
               </thead>
               <tbody className="font-mono">
@@ -106,6 +115,8 @@ export const PrintReportModal: React.FC<PrintReportModalProps> = ({
                   const ind = INDICATORS.find((i) => i.id === summary.id)!;
                   const isMet = summary.isMetAverage;
                   const hasData = summary.avgPercent !== null;
+                  const annInd = annualSummary.indicators.find((i) => i.id === summary.id);
+                  const hasAnnualData = annInd?.annualAvgPercent !== null && annInd?.annualAvgPercent !== undefined;
 
                   return (
                     <tr key={summary.id} className="hover:bg-slate-50">
@@ -124,14 +135,21 @@ export const PrintReportModal: React.FC<PrintReportModalProps> = ({
                       <td className="border border-slate-400 py-2 px-2 text-right pr-3">
                         {summary.type === 'PERCENT_ONLY' ? '-' : summary.avgDenominator !== null ? formatNumber(summary.avgDenominator, 2) : '-'}
                       </td>
-                      <td className="border border-slate-400 py-2 px-3 text-center font-bold bg-slate-100 text-slate-900">
+                      <td className="border border-slate-400 py-2 px-2 text-center font-bold bg-slate-100 text-slate-900">
                         {hasData && summary.avgPercent !== null ? `${summary.avgPercent.toFixed(2)}%` : '-'}
                       </td>
+                      <td className="border border-slate-400 py-2 px-2 text-center font-bold bg-emerald-50 text-emerald-950">
+                        {hasAnnualData && annInd?.annualAvgPercent !== null ? `${annInd.annualAvgPercent.toFixed(2)}%` : '-'}
+                      </td>
                       <td className="border border-slate-400 py-2 px-2 text-center font-sans text-[11px] font-bold">
-                        {isMet === true ? (
+                        {annInd?.isMetAnnual === true ? (
                           <span className="text-emerald-800">TERCAPAI</span>
-                        ) : isMet === false ? (
+                        ) : annInd?.isMetAnnual === false ? (
                           <span className="text-rose-800">BELUM TERCAPAI</span>
+                        ) : isMet === true ? (
+                          <span className="text-emerald-800">TERCAPAI (BLN)</span>
+                        ) : isMet === false ? (
+                          <span className="text-rose-800">BELUM TERCAPAI (BLN)</span>
                         ) : (
                           <span className="text-slate-400">BELUM ADA DATA</span>
                         )}

@@ -1,41 +1,64 @@
 import * as XLSX from 'xlsx';
 import { INDICATORS, MONTH_NAMES, UNITS } from '../data/inmConfig';
 import { HospitalConfig, MonthlyRecord } from '../types/inm';
-import { computeMonthlySummaries } from './calculations';
+import { computeAnnualSummaries, computeMonthlySummaries } from './calculations';
 
 /**
- * Exports current monthly record into an Excel workbook.
- * Sheet 1: Rekapitulasi Nilai Rata-Rata Mutu RS (Consolidated Average of each indicator)
- * Sheet 2: Rincian Data Per Unit (Matrix of 9 units)
+ * Exports monthly and annual records into an Excel workbook.
+ * Sheet 1: Rekapitulasi Nilai Rata-Rata Mutu RS (Bulanan & Tahunan)
+ * Sheet 2: Rincian Data Per Unit (Matrix 9 units)
+ * Sheet 3: Rekapitulasi Tahunan (12 Bulan & Rata-Rata Tahunan)
  */
-export function exportToExcel(record: MonthlyRecord, hospital: HospitalConfig) {
+export function exportToExcel(
+  record: MonthlyRecord,
+  hospital: HospitalConfig,
+  yearRecords?: Record<number, MonthlyRecord>
+) {
   const summaries = computeMonthlySummaries(record);
   const monthName = MONTH_NAMES[record.month - 1];
+  const annualSummary = computeAnnualSummaries(
+    record.year,
+    yearRecords || { [record.month]: record }
+  );
 
   const wb = XLSX.utils.book_new();
 
-  // SHEET 1: REKAPITULASI NILAI RATA-RATA MUTU
+  // SHEET 1: REKAPITULASI NILAI RATA-RATA MUTU (BULANAN & TAHUNAN)
   const avgRows: (string | number)[][] = [
     [hospital.name],
     [hospital.subTitle],
     [`LAPORAN REKAPITULASI NILAI RATA-RATA INDIKATOR NASIONAL MUTU (INM)`],
-    [`PERIODE: BULAN ${monthName.toUpperCase()} ${record.year}`],
+    [`PERIODE: BULAN ${monthName.toUpperCase()} & REKAP TAHUNAN ${record.year}`],
     [],
     [
       'NO.',
       'INDIKATOR NASIONAL MUTU',
       'STANDAR / TARGET',
-      'RATA-RATA NUMERATOR (N)',
-      'RATA-RATA DENOMINATOR (D)',
-      'NILAI RATA-RATA CAPAIAN (%)',
-      'STATUS CAPAIAN',
+      `RATA-RATA N (${monthName.toUpperCase()})`,
+      `RATA-RATA D (${monthName.toUpperCase()})`,
+      `RATA-RATA BULAN ${monthName.toUpperCase()} (%)`,
+      'STATUS BULANAN',
+      `RATA-RATA PER TAHUN ${record.year} (%)`,
+      'STATUS TAHUNAN',
     ],
   ];
 
   summaries.forEach((summary) => {
     const isMet = summary.isMetAverage;
-    const statusText =
+    const statusMonthly =
       isMet === true ? 'TERCAPAI' : isMet === false ? 'BELUM TERCAPAI' : 'BELUM ADA DATA';
+
+    const annInd = annualSummary.indicators.find((i) => i.id === summary.id);
+    const annAvgPct =
+      annInd?.annualAvgPercent !== null && annInd?.annualAvgPercent !== undefined
+        ? Number(annInd.annualAvgPercent.toFixed(2))
+        : '-';
+    const statusAnnual =
+      annInd?.isMetAnnual === true
+        ? 'TERCAPAI'
+        : annInd?.isMetAnnual === false
+        ? 'BELUM TERCAPAI'
+        : 'BELUM ADA DATA';
 
     avgRows.push([
       summary.id,
@@ -44,7 +67,9 @@ export function exportToExcel(record: MonthlyRecord, hospital: HospitalConfig) {
       summary.type === 'PERCENT_ONLY' ? '-' : summary.avgNumerator !== null ? Number(summary.avgNumerator.toFixed(2)) : '-',
       summary.type === 'PERCENT_ONLY' ? '-' : summary.avgDenominator !== null ? Number(summary.avgDenominator.toFixed(2)) : '-',
       summary.avgPercent !== null ? Number(summary.avgPercent.toFixed(2)) : '-',
-      statusText,
+      statusMonthly,
+      annAvgPct,
+      statusAnnual,
     ]);
   });
 
@@ -53,10 +78,12 @@ export function exportToExcel(record: MonthlyRecord, hospital: HospitalConfig) {
     { wch: 6 },  // NO
     { wch: 45 }, // INDIKATOR
     { wch: 18 }, // STANDAR
-    { wch: 24 }, // RATA N
-    { wch: 24 }, // RATA D
-    { wch: 28 }, // NILAI RATA %
-    { wch: 20 }, // STATUS
+    { wch: 22 }, // RATA N
+    { wch: 22 }, // RATA D
+    { wch: 26 }, // NILAI RATA % BULANAN
+    { wch: 18 }, // STATUS BULANAN
+    { wch: 26 }, // NILAI RATA % TAHUNAN
+    { wch: 18 }, // STATUS TAHUNAN
   ];
 
   XLSX.utils.book_append_sheet(wb, wsAvg, `Rekap_Rata_Rata_INM`);
@@ -136,8 +163,62 @@ export function exportToExcel(record: MonthlyRecord, hospital: HospitalConfig) {
 
   XLSX.utils.book_append_sheet(wb, wsUnits, `Rincian_Unit_Pelayanan`);
 
+  // SHEET 3: REKAP TAHUNAN 12 BULAN & RATA-RATA TAHUNAN
+  const annualRows: (string | number)[][] = [
+    [hospital.name],
+    [hospital.subTitle],
+    [`REKAPITULASI RATA-RATA TAHUNAN INDIKATOR NASIONAL MUTU (INM)`],
+    [`TAHUN PELAPORAN: ${record.year}`],
+    [],
+    [
+      'NO.',
+      'INDIKATOR NASIONAL MUTU',
+      'TARGET',
+      ...MONTH_NAMES.map((m) => m.substring(0, 3).toUpperCase()),
+      `RATA-RATA PER TAHUN ${record.year} (%)`,
+      'STATUS TAHUNAN',
+    ],
+  ];
+
+  annualSummary.indicators.forEach((annInd) => {
+    const monthlyCols = annInd.monthlyPercents.map((pct) =>
+      pct !== null && pct !== undefined ? Number(pct.toFixed(2)) : '-'
+    );
+    const annAvgPct =
+      annInd.annualAvgPercent !== null && annInd.annualAvgPercent !== undefined
+        ? Number(annInd.annualAvgPercent.toFixed(2))
+        : '-';
+    const statusAnnual =
+      annInd.isMetAnnual === true
+        ? 'TERCAPAI'
+        : annInd.isMetAnnual === false
+        ? 'BELUM TERCAPAI'
+        : 'BELUM ADA DATA';
+
+    annualRows.push([
+      annInd.id,
+      annInd.title,
+      annInd.targetLabel,
+      ...monthlyCols,
+      annAvgPct,
+      statusAnnual,
+    ]);
+  });
+
+  const wsAnnual = XLSX.utils.aoa_to_sheet(annualRows);
+  wsAnnual['!cols'] = [
+    { wch: 6 },  // NO
+    { wch: 45 }, // INDIKATOR
+    { wch: 18 }, // TARGET
+    ...MONTH_NAMES.map(() => ({ wch: 10 })), // 12 Months
+    { wch: 26 }, // RATA TAHUNAN
+    { wch: 18 }, // STATUS
+  ];
+
+  XLSX.utils.book_append_sheet(wb, wsAnnual, `Rekap_Tahunan_${record.year}`);
+
   // Download workbook
-  XLSX.writeFile(wb, `Laporan_Rata_Rata_INM_${monthName}_${record.year}.xlsx`);
+  XLSX.writeFile(wb, `Laporan_Mutu_Nasional_${monthName}_dan_Tahunan_${record.year}.xlsx`);
 }
 
 /**

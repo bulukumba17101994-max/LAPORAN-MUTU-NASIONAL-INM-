@@ -1,5 +1,13 @@
 import { INDICATORS, UNITS } from '../data/inmConfig';
-import { IndicatorDefinition, IndicatorRowData, IndicatorSummary, MonthlyRecord, UnitCode } from '../types/inm';
+import {
+  AnnualIndicatorSummary,
+  AnnualReportSummary,
+  IndicatorDefinition,
+  IndicatorRowData,
+  IndicatorSummary,
+  MonthlyRecord,
+  UnitCode
+} from '../types/inm';
 
 export function calculatePercent(numerator?: number | null, denominator?: number | null): number | null {
   if (numerator === null || numerator === undefined || denominator === null || denominator === undefined) {
@@ -177,3 +185,111 @@ export function computeOverallStats(summaries: IndicatorSummary[]) {
     complianceRate,
   };
 }
+
+/**
+ * Computes the Annual Average (Rata-Rata Tahunan) for each of the 13 indicators
+ * across all 12 months for a specified year.
+ */
+export function computeAnnualSummaries(
+  year: number,
+  recordsByMonth: Record<number, MonthlyRecord>
+): AnnualReportSummary {
+  let totalMet = 0;
+  let totalNotMet = 0;
+  let totalWithData = 0;
+
+  const indicators: AnnualIndicatorSummary[] = INDICATORS.map((ind) => {
+    const monthlyPercents: (number | null)[] = [];
+    let sumMonthlyPct = 0;
+    let activeMonthsCount = 0;
+
+    let sumMonthlyNum = 0;
+    let countNum = 0;
+    let sumMonthlyDen = 0;
+    let countDen = 0;
+
+    let bestMonth: { month: number; percent: number } | null = null;
+    let lowestMonth: { month: number; percent: number } | null = null;
+
+    for (let m = 1; m <= 12; m++) {
+      const record = recordsByMonth[m];
+      if (record && record.data && record.data[ind.id]) {
+        const summary = computeIndicatorSummary(ind, record.data[ind.id]);
+        const pct = summary.avgPercent;
+        monthlyPercents.push(pct);
+
+        if (pct !== null) {
+          sumMonthlyPct += pct;
+          activeMonthsCount++;
+
+          if (bestMonth === null || pct > bestMonth.percent) {
+            bestMonth = { month: m, percent: pct };
+          }
+          if (lowestMonth === null || pct < lowestMonth.percent) {
+            lowestMonth = { month: m, percent: pct };
+          }
+        }
+
+        if (summary.avgNumerator !== null) {
+          sumMonthlyNum += summary.avgNumerator;
+          countNum++;
+        }
+        if (summary.avgDenominator !== null) {
+          sumMonthlyDen += summary.avgDenominator;
+          countDen++;
+        }
+      } else {
+        monthlyPercents.push(null);
+      }
+    }
+
+    const annualAvgPercent = activeMonthsCount > 0 ? sumMonthlyPct / activeMonthsCount : null;
+    const annualAvgNumerator = countNum > 0 ? sumMonthlyNum / countNum : null;
+    const annualAvgDenominator = countDen > 0 ? sumMonthlyDen / countDen : null;
+
+    const isMetAnnual =
+      annualAvgPercent !== null
+        ? isTargetMet(annualAvgPercent, ind.targetOperator, ind.targetValue)
+        : null;
+
+    if (annualAvgPercent !== null) {
+      totalWithData++;
+      if (isMetAnnual === true) {
+        totalMet++;
+      } else if (isMetAnnual === false) {
+        totalNotMet++;
+      }
+    }
+
+    return {
+      id: ind.id,
+      title: ind.title,
+      code: ind.code,
+      targetLabel: ind.targetLabel,
+      targetValue: ind.targetValue,
+      targetOperator: ind.targetOperator,
+      type: ind.type,
+      monthlyPercents,
+      activeMonthsCount,
+      annualAvgPercent,
+      annualAvgNumerator,
+      annualAvgDenominator,
+      isMetAnnual,
+      bestMonth,
+      lowestMonth,
+    };
+  });
+
+  const overallAnnualComplianceRate =
+    totalWithData > 0 ? (totalMet / totalWithData) * 100 : 0;
+
+  return {
+    year,
+    indicators,
+    overallAnnualComplianceRate,
+    totalMet,
+    totalNotMet,
+    totalWithData,
+  };
+}
+

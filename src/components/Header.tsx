@@ -12,7 +12,8 @@ import {
   CheckCircle2,
   Building2,
   Sparkles,
-  ShieldCheck
+  ShieldCheck,
+  Cloud
 } from 'lucide-react';
 import { MONTH_NAMES } from '../data/inmConfig';
 import { HospitalConfig } from '../types/inm';
@@ -33,6 +34,7 @@ interface HeaderProps {
   onBackupData: () => void;
   onImportFile: (e: React.ChangeEvent<HTMLInputElement>) => void;
   isSaved?: boolean;
+  syncStatus?: 'synced' | 'syncing' | 'offline';
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -50,7 +52,8 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenDeleteModal,
   onBackupData,
   onImportFile,
-  isSaved = true
+  isSaved = true,
+  syncStatus = 'synced'
 }) => {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -230,10 +233,24 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           </nav>
 
-          {/* Autosave status indicator */}
-          <div className="hidden md:flex items-center gap-1.5 text-xs text-slate-600 font-medium">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            <span>Real-time & Tersimpan Permanen</span>
+          {/* Cloud Synchronization status indicator */}
+          <div className="hidden md:flex items-center gap-1.5 text-xs font-medium">
+            {syncStatus === 'syncing' ? (
+              <span className="flex items-center gap-1.5 text-amber-700 bg-amber-50 px-2.5 py-1 rounded-full border border-amber-200">
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping"></span>
+                <span>Menyinkronkan ke Cloud...</span>
+              </span>
+            ) : syncStatus === 'offline' ? (
+              <span className="flex items-center gap-1.5 text-slate-600 bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200">
+                <span className="w-2 h-2 rounded-full bg-slate-400"></span>
+                <span>Mode Offline (Tersimpan Lokal)</span>
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5 text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200 shadow-2xs">
+                <Cloud className="w-3.5 h-3.5 text-emerald-600" />
+                <span className="font-semibold">Sinkron Cloud Aktif (Data Sama di Semua Perangkat)</span>
+              </span>
+            )}
           </div>
         </div>
       </div>

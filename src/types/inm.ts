@@ -99,3 +99,31 @@ export interface ThresholdAlert {
   recommendation: string;
 }
 
+export interface AnnualIndicatorSummary {
+  id: number;
+  title: string;
+  code: string;
+  targetLabel: string;
+  targetValue: number;
+  targetOperator: string;
+  type: IndicatorType;
+  monthlyPercents: (number | null)[]; // Index 0 = Jan, ..., 11 = Dec
+  activeMonthsCount: number;
+  annualAvgPercent: number | null;
+  annualAvgNumerator: number | null;
+  annualAvgDenominator: number | null;
+  isMetAnnual: boolean | null;
+  bestMonth?: { month: number; percent: number } | null;
+  lowestMonth?: { month: number; percent: number } | null;
+}
+
+export interface AnnualReportSummary {
+  year: number;
+  indicators: AnnualIndicatorSummary[];
+  overallAnnualComplianceRate: number;
+  totalMet: number;
+  totalNotMet: number;
+  totalWithData: number;
+}
+
+

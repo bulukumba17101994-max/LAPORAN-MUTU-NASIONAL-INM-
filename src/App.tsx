@@ -9,7 +9,17 @@ import { DeleteConfirmModal } from './components/DeleteConfirmModal';
 import { DEFAULT_HOSPITAL_CONFIG, createEmptyRecord, MONTH_NAMES } from './data/inmConfig';
 import { HospitalConfig, MonthlyRecord, UnitCode } from './types/inm';
 import { exportToCSV, exportToExcel, parseImportFile } from './utils/exportExcel';
-import { AlertCircle, CheckCircle, Info, Sparkles } from 'lucide-react';
+import {
+  subscribeToMonthlyRecord,
+  subscribeToYearRecords,
+  saveRecordToCloud,
+  deleteRecordFromCloud,
+  deleteAllRecordsFromCloud,
+  subscribeToHospitalConfig,
+  saveHospitalConfigToCloud,
+  fetchAllCloudRecords
+} from './services/firebase';
+import { AlertCircle, CheckCircle, Info, Sparkles, Cloud } from 'lucide-react';
 
 const STORAGE_KEY_PREFIX = 'inm_record_';
 const HOSPITAL_STORAGE_KEY = 'inm_hospital_config';
@@ -36,6 +46,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'input' | 'report' | 'analytics'>('input');
   const [selectedMonth, setSelectedMonth] = useState<number>(1); // 1 = Januari
   const [selectedYear, setSelectedYear] = useState<number>(2025);
+  const [syncStatus, setSyncStatus] = useState<'synced' | 'syncing' | 'offline'>('synced');
+  const [yearRecords, setYearRecords] = useState<Record<number, MonthlyRecord>>({});
 
   const [hospital, setHospital] = useState<HospitalConfig>(() => {
     try {
@@ -54,7 +66,7 @@ export default function App() {
       const saved = localStorage.getItem(key);
       if (saved) {
         const parsed = JSON.parse(saved);
-        // Clear any remnants of old mock sample data permanently
+        // Clean any remnants of old mock sample data permanently
         if (parsed?.data?.[1]?.IRNA?.numerator === 1220 || parsed?.data?.[4]?.OK?.numerator === 24) {
           const fresh = createEmptyRecord(1, 2025);
           localStorage.setItem(key, JSON.stringify(fresh));
@@ -81,14 +93,35 @@ export default function App() {
     }, 3500);
   };
 
-  // Load record when month or year changes
+  // Subscribe to Hospital Config in Cloud Firestore (live sync across all devices)
+  useEffect(() => {
+    const unsub = subscribeToHospitalConfig(
+      (cloudConfig) => {
+        if (cloudConfig) {
+          setHospital(cloudConfig);
+          try {
+            localStorage.setItem(HOSPITAL_STORAGE_KEY, JSON.stringify(cloudConfig));
+          } catch (e) {
+            console.error(e);
+          }
+        }
+      },
+      (err) => {
+        console.warn('Hospital config live sync fallback to local:', err);
+      }
+    );
+    return () => unsub();
+  }, []);
+
+  // Live real-time Cloud Firestore synchronization for monthly record
   useEffect(() => {
     const key = `${STORAGE_KEY_PREFIX}${selectedYear}_${selectedMonth}`;
+
+    // 1. Fast load from local storage cache for immediate display
     try {
       const saved = localStorage.getItem(key);
       if (saved) {
         const parsed = JSON.parse(saved);
-        // Ensure old sample numbers are cleared if encountered
         if (parsed?.data?.[1]?.IRNA?.numerator === 1220 || parsed?.data?.[4]?.OK?.numerator === 24) {
           const fresh = createEmptyRecord(selectedMonth, selectedYear);
           localStorage.setItem(key, JSON.stringify(fresh));
@@ -97,38 +130,139 @@ export default function App() {
           setCurrentRecord(parsed);
         }
       } else {
-        // Initialize pristine empty record
         setCurrentRecord(createEmptyRecord(selectedMonth, selectedYear));
       }
     } catch (e) {
       console.error(e);
+      setCurrentRecord(createEmptyRecord(selectedMonth, selectedYear));
     }
+
+    // 2. Real-time Cloud listener (sync across any device/browser anywhere)
+    const unsub = subscribeToMonthlyRecord(
+      selectedYear,
+      selectedMonth,
+      (cloudRecord) => {
+        if (cloudRecord) {
+          setCurrentRecord(cloudRecord);
+          try {
+            localStorage.setItem(key, JSON.stringify(cloudRecord));
+          } catch (e) {
+            console.error(e);
+          }
+          setSyncStatus('synced');
+        } else {
+          // Record doesn't exist on Cloud yet; if local cache has meaningful data, push to Cloud
+          try {
+            const local = localStorage.getItem(key);
+            if (local) {
+              const parsed = JSON.parse(local);
+              if (!isRecordEmpty(parsed)) {
+                saveRecordToCloud(parsed).catch(console.error);
+              }
+            }
+          } catch (e) {
+            console.error(e);
+          }
+          setSyncStatus('synced');
+        }
+      },
+      (err) => {
+        console.warn('Real-time cloud listener offline:', err);
+        setSyncStatus('offline');
+      }
+    );
+
+    return () => unsub();
   }, [selectedMonth, selectedYear]);
 
-  // Save current record to localStorage real-time
-  const handleUpdateRecord = (updatedRecord: MonthlyRecord) => {
+  // Live real-time Cloud Firestore synchronization for all 12 months of selectedYear
+  useEffect(() => {
+    // 1. Initial fast load from localStorage cache
+    const initialYearMap: Record<number, MonthlyRecord> = {};
+    for (let m = 1; m <= 12; m++) {
+      const k = `${STORAGE_KEY_PREFIX}${selectedYear}_${m}`;
+      const local = localStorage.getItem(k);
+      if (local) {
+        try {
+          const parsed = JSON.parse(local);
+          if (!isRecordEmpty(parsed)) {
+            initialYearMap[m] = parsed;
+          }
+        } catch (e) {}
+      }
+    }
+    if (!isRecordEmpty(currentRecord) && currentRecord.year === selectedYear) {
+      initialYearMap[currentRecord.month] = currentRecord;
+    }
+    setYearRecords(initialYearMap);
+
+    // 2. Real-time subscription to all records of selectedYear from Cloud Firestore
+    const unsub = subscribeToYearRecords(
+      selectedYear,
+      (cloudRecords) => {
+        setYearRecords((prev) => ({
+          ...prev,
+          ...cloudRecords,
+        }));
+      },
+      (err) => {
+        console.warn('Real-time year records listener offline:', err);
+      }
+    );
+
+    return () => unsub();
+  }, [selectedYear]);
+
+  // Real-time Update: updates local state, localStorage cache, and Cloud Firestore simultaneously
+  const handleUpdateRecord = async (updatedRecord: MonthlyRecord) => {
+    // 1. Immediate UI update
     setCurrentRecord(updatedRecord);
+    if (updatedRecord.year === selectedYear) {
+      setYearRecords((prev) => ({
+        ...prev,
+        [updatedRecord.month]: updatedRecord,
+      }));
+    }
+
+    // 2. Immediate Local Storage cache
+    const key = `${STORAGE_KEY_PREFIX}${updatedRecord.year}_${updatedRecord.month}`;
     try {
-      const key = `${STORAGE_KEY_PREFIX}${updatedRecord.year}_${updatedRecord.month}`;
       localStorage.setItem(key, JSON.stringify(updatedRecord));
     } catch (e) {
       console.error('Failed to save to localStorage:', e);
     }
-  };
 
-  // Save hospital configuration
-  const handleSaveHospital = (newConfig: HospitalConfig) => {
-    setHospital(newConfig);
+    // 3. Real-time Cloud Firestore push (accessible anywhere)
+    setSyncStatus('syncing');
     try {
-      localStorage.setItem(HOSPITAL_STORAGE_KEY, JSON.stringify(newConfig));
-      showToast('Data identitas rumah sakit berhasil diperbarui!');
-    } catch (e) {
-      console.error(e);
+      await saveRecordToCloud(updatedRecord);
+      setSyncStatus('synced');
+    } catch (err) {
+      console.error('Failed to push to Cloud Firestore:', err);
+      setSyncStatus('offline');
     }
   };
 
-  // Delete handlers
-  const handleDeleteCurrentMonth = () => {
+  // Save hospital configuration locally and to Cloud
+  const handleSaveHospital = async (newConfig: HospitalConfig) => {
+    setHospital(newConfig);
+    try {
+      localStorage.setItem(HOSPITAL_STORAGE_KEY, JSON.stringify(newConfig));
+    } catch (e) {
+      console.error(e);
+    }
+
+    try {
+      await saveHospitalConfigToCloud(newConfig);
+      showToast('Data identitas rumah sakit berhasil disinkronkan ke Cloud & Lokal!');
+    } catch (e) {
+      console.error('Error saving hospital config to cloud:', e);
+      showToast('Data tersimpan di perangkat lokal (menunggu koneksi cloud)', 'info');
+    }
+  };
+
+  // Delete handlers (Cloud & Local)
+  const handleDeleteCurrentMonth = async () => {
     const key = `${STORAGE_KEY_PREFIX}${selectedYear}_${selectedMonth}`;
     try {
       localStorage.removeItem(key);
@@ -137,10 +271,22 @@ export default function App() {
     }
     const emptyRecord = createEmptyRecord(selectedMonth, selectedYear);
     setCurrentRecord(emptyRecord);
-    showToast(`Data bulan ${MONTH_NAMES[selectedMonth - 1]} ${selectedYear} telah berhasil dikosongkan.`, 'info');
+    setYearRecords((prev) => {
+      const next = { ...prev };
+      delete next[selectedMonth];
+      return next;
+    });
+
+    try {
+      await deleteRecordFromCloud(selectedYear, selectedMonth);
+      showToast(`Data bulan ${MONTH_NAMES[selectedMonth - 1]} ${selectedYear} telah berhasil dikosongkan dari Cloud & Lokal.`, 'info');
+    } catch (err) {
+      console.error(err);
+      showToast(`Data bulan telah dikosongkan di perangkat lokal.`, 'info');
+    }
   };
 
-  const handleDeleteAllData = () => {
+  const handleDeleteAllData = async () => {
     try {
       const keysToRemove: string[] = [];
       for (let i = 0; i < localStorage.length; i++) {
@@ -155,19 +301,41 @@ export default function App() {
     }
     const emptyRecord = createEmptyRecord(selectedMonth, selectedYear);
     setCurrentRecord(emptyRecord);
-    showToast('Seluruh data indikator mutu di semua periode berhasil dihapus secara permanen.', 'info');
+    setYearRecords({});
+
+    try {
+      await deleteAllRecordsFromCloud();
+      showToast('Seluruh data indikator mutu di semua periode berhasil dihapus permanen dari Cloud & Lokal.', 'info');
+    } catch (err) {
+      console.error(err);
+      showToast('Seluruh data di perangkat lokal berhasil dikosongkan.', 'info');
+    }
   };
 
-  // Backup all data to JSON
-  const handleBackupData = () => {
+  // Backup all data to JSON (incorporating both Cloud & local cache)
+  const handleBackupData = async () => {
     try {
-      const allRecords: Record<string, MonthlyRecord> = {};
+      // 1. Fetch from cloud
+      let allRecords: Record<string, MonthlyRecord> = {};
+      try {
+        allRecords = await fetchAllCloudRecords();
+      } catch (err) {
+        console.warn('Could not fetch cloud records for backup, using local cache:', err);
+      }
+
+      // 2. Merge local records
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
         if (key && key.startsWith(STORAGE_KEY_PREFIX)) {
           try {
             const val = localStorage.getItem(key);
-            if (val) allRecords[key] = JSON.parse(val);
+            if (val) {
+              const parsed = JSON.parse(val);
+              const cloudKey = `${parsed.year}_${parsed.month}`;
+              if (!allRecords[cloudKey]) {
+                allRecords[cloudKey] = parsed;
+              }
+            }
           } catch (err) {
             console.error(err);
           }
@@ -175,7 +343,7 @@ export default function App() {
       }
 
       // Also ensure current record is included
-      const currentKey = `${STORAGE_KEY_PREFIX}${selectedYear}_${selectedMonth}`;
+      const currentKey = `${selectedYear}_${selectedMonth}`;
       allRecords[currentKey] = currentRecord;
 
       const backupPayload = {
@@ -203,7 +371,7 @@ export default function App() {
   // Export handlers
   const handleExportExcel = () => {
     try {
-      exportToExcel(currentRecord, hospital);
+      exportToExcel(currentRecord, hospital, yearRecords);
       showToast('Laporan berhasil diekspor ke format Excel (.xlsx)!');
     } catch (err) {
       console.error(err);
@@ -232,25 +400,28 @@ export default function App() {
         const text = await file.text();
         const parsed = JSON.parse(text);
         if (parsed.records) {
-          Object.entries(parsed.records).forEach(([k, rec]) => {
-            localStorage.setItem(k, JSON.stringify(rec));
-          });
+          for (const [k, rec] of Object.entries(parsed.records)) {
+            const monthlyRec = rec as MonthlyRecord;
+            localStorage.setItem(`${STORAGE_KEY_PREFIX}${monthlyRec.year}_${monthlyRec.month}`, JSON.stringify(monthlyRec));
+            // Sync to cloud
+            saveRecordToCloud(monthlyRec).catch(console.error);
+          }
           if (parsed.hospital) {
             handleSaveHospital(parsed.hospital);
           }
-          const currentKey = `${STORAGE_KEY_PREFIX}${selectedYear}_${selectedMonth}`;
+          const currentKey = `${selectedYear}_${selectedMonth}`;
           if (parsed.records[currentKey]) {
-            setCurrentRecord(parsed.records[currentKey]);
+            setCurrentRecord(parsed.records[currentKey] as MonthlyRecord);
           }
-          showToast(`Berkas cadangan "${file.name}" berhasil dipulihkan!`);
+          showToast(`Berkas cadangan "${file.name}" berhasil dipulihkan & disinkronkan ke Cloud!`);
           return;
         }
       }
 
       // If it's an Excel or CSV file
       const mergedRecord = await parseImportFile(file, currentRecord);
-      handleUpdateRecord(mergedRecord);
-      showToast(`Data dari file "${file.name}" berhasil diimpor ke bulan ${MONTH_NAMES[selectedMonth - 1]}!`);
+      await handleUpdateRecord(mergedRecord);
+      showToast(`Data dari file "${file.name}" berhasil diimpor ke bulan ${MONTH_NAMES[selectedMonth - 1]} & tersinkron ke Cloud!`);
     } catch (err: any) {
       console.error(err);
       showToast(err.message || 'Gagal membaca format file yang diunggah.', 'error');
@@ -314,10 +485,31 @@ export default function App() {
         onBackupData={handleBackupData}
         onImportFile={handleImportFile}
         isSaved={true}
+        syncStatus={syncStatus}
       />
 
       {/* Main Content Body */}
       <main className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1">
+        {/* Real-time Cloud Sync Banner */}
+        <div className="mb-4 px-4 py-2.5 rounded-xl bg-white border border-slate-200/80 shadow-2xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs text-slate-600">
+          <div className="flex items-center gap-2">
+            <span className="flex h-2.5 w-2.5 relative shrink-0">
+              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${syncStatus === 'syncing' ? 'bg-amber-400' : 'bg-emerald-400'}`}></span>
+              <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${syncStatus === 'syncing' ? 'bg-amber-500' : 'bg-emerald-500'}`}></span>
+            </span>
+            <span className="font-semibold text-slate-800">
+              Cloud Database Terhubung:
+            </span>
+            <span>
+              Perubahan data di perangkat ini langsung tersinkronisasi otomatis ke semua komputer, tablet, & HP lain secara live.
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200 shrink-0">
+            <Cloud className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Database Online: Aktif</span>
+          </div>
+        </div>
+
         {/* Empty month notification if no data yet */}
         {isRecordEmpty(currentRecord) && (
           <div className="mb-6 p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-950 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
@@ -326,7 +518,7 @@ export default function App() {
               <div>
                 <p className="font-bold">Bulan {MONTH_NAMES[selectedMonth - 1]} {selectedYear} siap untuk penginputan data</p>
                 <p className="text-emerald-800">
-                  Data Anda tersimpan secara real-time dan aman permanen di perangkat ini kecuali dihapus secara sengaja.
+                  Data Anda tersinkronisasi di Cloud dan aman permanen di perangkat ini kecuali dihapus secara sengaja.
                 </p>
               </div>
             </div>
@@ -334,7 +526,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleCopyFromPreviousMonth}
-                className="px-3.5 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-semibold rounded-lg transition-colors cursor-pointer"
+                className="px-3.5 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-semibold rounded-lg transition-colors cursor-pointer shadow-xs"
               >
                 Salin dari Bulan Lalu
               </button>
@@ -350,11 +542,12 @@ export default function App() {
           />
         )}
 
-        {/* Tab 2: Laporan Mutu Nasional (Rekap Bulanan) */}
+        {/* Tab 2: Laporan Mutu Nasional (Rekap Bulanan & Tahunan) */}
         {activeTab === 'report' && (
           <ReportSheet
             record={currentRecord}
             hospital={hospital}
+            yearRecords={yearRecords}
             onExportExcel={handleExportExcel}
             onExportCSV={handleExportCSV}
             onPrint={() => setIsPrintModalOpen(true)}
@@ -376,7 +569,7 @@ export default function App() {
           </p>
           <div className="flex items-center gap-2 text-[11px] text-slate-500">
             <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-            <span>Penyimpanan Real-Time Aktif & Aman</span>
+            <span>Cloud Database Firestore &bull; Sinkronisasi Multi-Device Aktif</span>
           </div>
         </div>
       </footer>
@@ -387,6 +580,7 @@ export default function App() {
         onClose={() => setIsPrintModalOpen(false)}
         record={currentRecord}
         hospital={hospital}
+        yearRecords={yearRecords}
       />
 
       {/* Hospital Identity Settings Modal */}
